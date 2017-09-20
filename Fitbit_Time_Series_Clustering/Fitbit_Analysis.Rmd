@@ -11,6 +11,9 @@ output:
   pdf_document: default
 ---
 
+#  {.tabset}
+
+## Part A: Project report
 
 
 ```{r setup, include=FALSE}
@@ -18,7 +21,7 @@ knitr::opts_chunk$set(message = FALSE, warning = FALSE)
 ```
 
 ### Background
-MapTrek game is a walking game designed to encourage more walking exercise amongst users. The users participate in the game by wearing Fitbit which syncs data with a mobile application that tracks their step counts. By walking more in real life, participants move their virtual avatar in the game further in the designated route. Each route corresponds to a place of natural interest, for example, Rome, Italy. At any point of the route, the game provides the users with a real view at that location, and the view changes as users make progress in their walking. 
+MapTrek game is a walking game designed to encourage more walking exercise amongst users**. The users participate in the game by wearing Fitbit which syncs data with a mobile application that tracks their step counts. By walking more in real life, participants move their virtual avatar in the game further in the designated route. Each route corresponds to a place of natural interest, for example, Rome, Italy. At any point of the route, the game provides the users with a real view at that location, and the view changes as users make progress in their walking. 
 
 *** 
 
@@ -473,3 +476,39 @@ However, depending on the future steps of the study, the 3-cluster model of the 
     + We can also take into account the day in which the walking pattern occurred. Does the user switch between "early morning walker" and "office walker" as the week goes on? Is the user's walking pattern consistent on a weekly basis? 
     
 * We would also hope to carry out similar analysis on the weekend days. Though the Step 1 of extracting out usable data will be messier, as we cannot conclude that one did not wear their Fitbit if the step counts start at 2pm on a Sunday, since people's schedule on weekends are indeed more flexible. It might result in fewer data for clustering, but there might be promising results. 
+
+
+
+## Part B: Internship Reflection
+
+### Learning Outcome
+"The key learning outcomes I want to achieve through this internship is to learn both the application of statistical modeling techniques to real-life datasets and learn to draw on statistical theories to support such application." -- written in my SLIP.
+
+Firstly, working on the summer projects is a process that inherently addresses the first goal on a regular basis. I applied a variety of statistical modeling and machine learning techniques, such as logistic regression, general linear models, k-means clustering, time-series analysis, random forest models to the real-life datasets. 
+
+To address the second goal, I spent a significant amount of time learning the theories behind the algorithms. To gain an in-depth understanding, I would go through the mathematical formula in the theories unless it gets far complicated. The *Machine Learning* course by Stanford University on Coursera was very helpful in giving a general knowledge map of various components in machine learning field. Applying the algorithms introduced in the course to the project I am working on, and troubleshooting along the way, gave me the confidence to learn new and related concepts and apply them in new settings. By intentionally designating time to strengthen my theoretical understandings, I notice that I am able to debug more modeling issues on my own because now I know if the outputs of a model look reasonable; I am also more mindful when choosing a modeling tool over the other given the type of data and the type of research questions. 
+
+
+### Technical Skills
+Coding in R on a daily basis helped me become significantly more familiar with the commonly used packages in R such as "dplyr", "readr", "tidyverse", "caret", etc. Sometimes it takes a little bit more familarity of the knowledge to elevate one's ability to understand the bigger picture. I feel the 9 weeks' practice prepared me well to explore other new tools and not feel impossible. 
+
+### Professional Development
+Going through the various stages of research under the guidance of the professionals like Jacob is an invaluable experience. By observing both his professional practice and analytical perspective, I have come to recognize some of the most distinct characteristics of capable data scientists: 
+
+* **Curiosity**. A capable data scientist always wonder and ask what happens if we solve the problem in another way and they make sure they will find an answer to that question.
+
+* **Critical**. They hardly buy into even the most convincing narratives without taking into account what is not shown, and what could be the alternative explanation. 
+
+* **Creative**. Jacob is extremely creative in his way of approaching the problems. He would suggest building a model to automate data cleaning, applying tools across fields (such as this unconventional project applying clustering to time series), and always encouraging me to look up new algorithms that even he is unfamiliar with. 
+
+In fact, the last characteristic connects to my own personality very well. Always fascinated by new ideas, I envisioned one of my potential careers be in the field of digital design. However, now I realize that I can think creatively in this analytical field too. Thus data science has become a professional direction I will seriously consider. 
+
+### Future actions 
+With this direction in mind, I have identified a few areas I want to work on in my senior year:
+
+* Analytical skills to unpack complex issues. I have observed how we can unravel one complex research question into multiple segments that are more workable. However, I still find the process of unpacking challenging. 
+
+* Independent learning skills and stamina. Data science is a fast emerging field, where information updates on a day-to-day basis. To keep up with the field, I not only need to be able to process the new information, but also do so fast enough. To do so, reading up data science blog post or project on a regular basis can help me stay informed of the new methods and applications.
+
+* Critical thinking skills in my own work. During my summer internship, I presented twice at the weekly meetings of professors and graduate students from Biostatistics, Econometrics in the School of Pharmacy. Though I had prepared well for both presentations, my professional audience ended up highlighting issues that I failed to pay attention to. It signifies that I have plenty of blind spots in my thinking that I should always keep questioning my results. Since the first presentation, I have been made aware of this and started working on it but it is indeed a long-term process to cultivate a critical thinking habit.
+
