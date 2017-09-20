@@ -1,0 +1,475 @@
+---
+title: "Time Series Clustering on MapTrek Fitbit Data"
+author:
+- "Jinlin He, Grinnell College'18"
+- "Mentor: Dr. Jacob Simmering, PhD, University of Iowa Health Ventures"
+- "CPT Faculty Sponsor: Dr. Charlie Curtsinger, PhD, Grinnell College"
+date: "July 21 2017"
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+### Background
+MapTrek game is a walking game designed to encourage more walking exercise amongst users. The users participate in the game by wearing Fitbit which syncs data with a mobile application that tracks their step counts. By walking more in real life, participants move their virtual avatar in the game further in the designated route. Each route corresponds to a place of natural interest, for example, Rome, Italy. At any point of the route, the game provides the users with a real view at that location, and the view changes as users make progress in their walking. 
+
+*** 
+
+### Goal
+The ultimate goal in this study is to understand individuals' walking patterns from their Fitbit step counts. If certain individuals with a particular walking pattern drop out of the game sooner than others, it is helpful for the researchers to identify them and introduce interventions. Understanding walking patterns on an individual level can also inspire game designs that further motivate the users.
+
+***
+
+### Data
+This study utilizes data from 73 office workers, who wore Fitbit in a consecutive period of 80 days on average. Since all of them participated in the MapTrek game and previous studies suggested that the game changes users' walking behaviors, so we filter out the days in which the users are already in the game. Therefore, we started out with the raw data that has 4863 days of minute-level step counts from these 73 individuals. Further data cleaning process reduced the sample to 2769 days from 72 individuals, in which we will explain in the following sections. 
+
+Throughout the study, we define each day as from 5am to 5am of the next morning. We also treat each day as the basic unit to work with, regardless of which individual it belongs to. 
+
+***
+
+### Method
+The analysis uses one of the unsupervised learning algorithms, k-means clustering, to recognize the major walking patterns from users on a day-to-day level. 
+
+K-means clustering algorithm starts with **n** random points (centroids) generated in the space, whereas **n** is specified by the user as the number of desired clusters. Then each data point is assigned to a cluster based on which centroid is the closest to it in space. After assigning every data point to one of the **n** centroids, the algorithm takes the average positions of all points assigned to the same centroid as the new centroid. Then again the algorithm distributes every data point to its closest centroid, and the process repeats until the centroid positions become stable.
+
+It is particularly appropriate to apply k-means clustering to this problem because we are not asking any particular close-ended question such as how does one's step counts per day relate to his or her compliance in the game. Instead, we hope that by treating step counts throughout the day as a time series, patterns will emerge on its own by the resultant clusters.
+
+```{r, echo = FALSE}
+# Libraries
+library(lubridate)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(caret)
+library(mclust)
+library(pROC)
+library(gridExtra)
+library(tidyverse)
+```
+
+*** 
+
+####__Step 1: Identify usable data__ 
+
+A general look at the original data reveals that in some days users wear their Fitbits only for a few hours. Fig.1 shows a sample of 5 person-days. Though Day A in red has a huge spike in step counts between 1pm ~ 2pm, but the user has no step counts on that day in all other time period, which suggests that it is likely that the user only wore Fitbit for that specific period but took it off for the rest of the day. Similaryly, Day E (pink), Day D (blue), Day B (Yellow) also suggest that the users probably did not wear their Fitbits for the whole day. In comparison, Day C (green)'s step counts, though relatively in small amount, develops throughout the day, suggesting the user is constantly wearing the Fitbit. It is not useful then to use data on days like A, B, D and E for clustering as they do not fully reflect the actual walking habits. 
+
+
+
+![](plot/Fig.1.png) 
+
+
+
+
+To distinguish the usable days from the unusable ones, we sampled 150 person-days from all the *weekdays* of the original data, since we expect weekday walking behavior to be less erratic. Then we manually identified the days in which we are confident that users wore their Fitbits all day. For example, in Fig.1, only Day C appears as a convincing case that the user wore their Fitbits throughout the day.
+
+To automate the process to the whole weekday dataset of 4863 cases, we trained a random forest model with cross validation on the 150 encoded sample with the indicator of whether one wore Fitbit for the whole day as the outcome. 
+
+From the minute-level step count data, we extracted these features to train the random forest:
+
+* Number of bouts for the day
+* Mean between-bouts time
+* S.d. between-bouts time
+* Duration between the first and the last bout of the day
+* Whether the day has bouts in the early morning (before 9 am)
+* Whether the day has bouts in the late evening (after 9 pm)
+
+*Note: the definition of a bout is a continuous period of walking without stop.
+
+```{r,  echo = FALSE}
+## Minute-level
+## Mark 5am ~ 5am next morning (hour is represented from 5 to 28)
+## Mark weekday, weekend (taking into account that before 5am of Saturday is counted as Friday and thus weekday; before 5am of Monday is counted as Sunday and thus weekend)
+SW3_game_uncomplete <- read_csv("data/Sedentary Worker/intra_day_deidentified.csv") %>%
+  filter(group == "MapTrek",
+         relative_days >= 0) %>%
+  group_by(subject_id) %>%
+  mutate(start = as.POSIXct(paste(date(first(datetime))," 05:00:00 UTC"), tz = "UTC"),
+         relative_day = floor(as.numeric(difftime(datetime,start,units = "days"))),
+         hour = hour(datetime),
+         minute = minute(datetime),
+         weekday = wday(datetime)) %>%
+  mutate(weekday = ifelse(weekday == 7 & hour < 5, 6, weekday), ## Sat before 5am -> Fri
+         weekday = ifelse(weekday == 2 & hour < 5, 1, weekday), ## Mon before 5am --> Sun
+         weekend = ifelse(weekday %in% c(1,7), 1, 0))%>%
+  mutate(hour =  as.numeric(ifelse((hour >= 0 & hour <= 4), hour + 24, hour)))%>%
+  filter(relative_day >=0) %>%
+  select(-relative_days)
+
+## Fill in every minute-level step counts
+## Mark bout
+SW3_game <- SW3_game_uncomplete %>%
+  complete(subject_id, relative_day, weekend,hour = 5:28, minute = 0:59,
+           fill = list(steps = 0)) %>%
+  mutate(bout = ifelse(steps == 0, 0,
+                  ifelse(lag(steps)==0,1,0))) %>%
+  group_by(subject_id,relative_day) %>%
+  dplyr::mutate(num_bout = sum(bout))
+
+## Compute between-bouts statistics
+uncomplete_helper2 <- SW3_game_uncomplete %>%
+  inner_join(SW3_game) %>%
+  filter(bout == 1) %>%
+  group_by(subject_id,relative_day) %>%
+  arrange(subject_id, datetime) %>% 
+  dplyr::mutate(pre_bout = lag(datetime, 1),
+                first_bout = first(datetime),
+                last_bout = last(datetime)) %>%
+  dplyr::mutate(til_prev_bout = as.numeric(difftime(datetime,pre_bout))) %>%
+  na.omit() %>%
+  dplyr::mutate(bw_bout_mean = mean(til_prev_bout),
+                bw_bout_med = median(til_prev_bout),
+                bw_bout_sd = sd(til_prev_bout),
+                first_last_bt = as.numeric(difftime(last_bout,first_bout, units = "mins")),
+                morning_bt = ifelse(hour(first_bout) < 9, 1,0),
+                night_bt = ifelse(difftime(last_bout,as.POSIXct(paste(date(first_bout)," 21:00:00 UTC"), tz = "UTC")) > 0, 1,0)) %>%
+  select(subject_id, relative_day,num_bout,bw_bout_mean,bw_bout_med,bw_bout_sd,first_last_bt,morning_bt,night_bt,weekend) %>%
+  unique()
+```
+
+
+```{r, echo=FALSE}
+## Maually encoded 150 person days
+selected_days <- read_csv("data/150_primary.csv", col_names = TRUE)
+SW3_game_selected <- selected_days %>%
+  left_join(SW3_game) %>%
+  select(subject_id,relative_day,datetime, hour,minute,steps,bout,num_bout,wear)
+
+## Join between bouts features (from uncomplete_helper2) with encoded 'wear'
+SW3_selected_features <- SW3_game_selected %>%
+  select(subject_id,relative_day,num_bout,wear) %>%
+  unique() %>%
+  inner_join(uncomplete_helper2) %>% 
+  select(-weekend) %>%
+  dplyr::mutate(morning_bt = as.factor(morning_bt),
+                night_bt = as.factor(night_bt)) %>%
+  na.omit()
+
+par <- createDataPartition(SW3_selected_features$wear, p = 0.65, list = FALSE)
+SW3_train <- SW3_selected_features[par,]
+SW3_test <- SW3_selected_features[-par,]
+
+SW3_train_f <- SW3_selected_features[par,] %>%
+  mutate(wear = as.factor(ifelse(wear == 1, 1, 0)))
+SW3_test_f <- SW3_test %>%
+  mutate(wear = as.factor(ifelse(wear == 1, 1, 0)))
+
+#random forest using a clear-cut 
+ctrl = trainControl(method="repeatedcv", number=10, repeats=5)
+
+rf <- train(wear ~ . -subject_id -relative_day, model = "rf", trControl = ctrl, data = na.omit(SW3_train_f))
+ pred_rf <- predict(rf,SW3_test_f)#, type = "prob")
+  acc_tbl_rf <- table(pred_rf,SW3_test_f$wear)
+  accuracy <- sum(diag(acc_tbl_rf))/sum(acc_tbl_rf)
+  sensitivity <- acc_tbl_rf[2,2]/sum(acc_tbl_rf[2,1],acc_tbl_rf[2,2])
+   specificity <- acc_tbl_rf[1,1]/sum(acc_tbl_rf[1,2],acc_tbl_rf[1,1])  ## Really good specificity since we categorize any non-zero wear probability to 0. However we would want to prioritize sensitivity.
+  
+   
+#roc(SW3_test_f$wear, predict(rf,SW3_test_f,type = "prob")[[1]]) ## 0.9133 ## 0.9242 # 0.9683 #0.9933
+```
+
+
+Applying this random forest model with an area under ROC curve around 0.95 (which essentially measures the accuracy of the classifier), we selected 2890 usable weekdays from the 3462 weekdays.
+```{r, echo=FALSE}
+## Apply the rf model to identify only the ones who are mostly likely wearing Fitbits  
+SW3_wear <- uncomplete_helper2 %>%
+     mutate(morning_bt = as.factor(morning_bt),
+            night_bt = as.factor(night_bt)) %>%
+     filter(weekend == 0) %>%  ## Since annotation only applies for weekday days so far
+     na.omit()
+wear <- predict(rf,SW3_wear)
+SW3_wear$wear <- wear
+SW3_wear <- SW3_wear %>%
+  filter(wear == 1) %>% 
+  select(subject_id,relative_day) ## 2801 weekday observations in which we are confident they are wearing Fitbits throughout the day
+```
+ 
+***
+
+####__Step 2: K-Means Clustering using step counts__ 
+
+Now with the 2890 usable person-day data, we aggregated the minute-level step counts into every 30-minute step counts to keep down the dimensions for clustering without compromising too much of the details. 
+
+Then we can supply the factors of interest to the clustering algorithm, which include the time series itself, i.e. every 30-minute step counts throughout the day, as well as the extracted features:
+
+* Mean step count
+* S.d. of step count
+* Number of steps taken between 5am ~ 7am
+* Number of steps taken between 9pm ~ 2am 
+* Mean sedentary time
+* S.d. of sedentary time
+
+In one of the primary analysis, the clustering algorithm in fact singled out the person days of a particular user with a Subject ID of 13. It turned out that the user has normal step counts during the day, but has very high-intensity and consistent step counts throughout the night period, which seems like a device error which does not reflect the user's actual walking patterns. Therefore, every data related to that user is removed from the clustering process. 
+
+After taking out the outlier subject data, we have 2857 days from 72 individuals. Using k-means algorithm to categorize these days into 3 clusters actually gave us very interesting insights:
+
+```{r, echo = FALSE}
+## Extract new features:
+# half-hourly steps (time series), and their mean, sd 
+# mean, sd of the sedentary period (in between the first and last steps)
+# before 7-9 am, after 8 pm 
+# duration between first and last step
+SW3_game_weekday <- SW3_game %>% 
+  filter(weekend == 0)
+SW3_step <- SW3_wear %>%
+  inner_join(SW3_game_weekday, by = c("subject_id", "relative_day")) %>%
+  group_by(subject_id,relative_day) %>%
+  mutate(half_hr = ifelse(minute >= 0 & minute < 30, 1, 2)) %>%
+  group_by(subject_id,relative_day,hour,half_hr) %>%
+  summarize(half_hr_step = sum(steps)) %>%
+  group_by(subject_id,relative_day) %>%
+  mutate(mean_step = mean(half_hr_step),
+         sd_step = sd(half_hr_step))## Problem: count after 9pm, before 7am as a whole? 
+  
+SW3_early_step <- SW3_step %>%
+  mutate(early = ifelse(hour < 7 & hour >= 5, 1, 0)) %>% ## steps between (5am-7am]
+  filter(early == 1) %>%
+  summarize(early_step = sum(half_hr_step))
+
+SW3_late_step <- SW3_step %>%
+  mutate(late = ifelse(hour < 2 | hour >= 21, 1, 0)) %>% ## steps between (9pm-2am]
+  filter(late == 1) %>%
+  summarize(late_step = sum(half_hr_step))
+
+SW3_step <- SW3_step %>%
+  inner_join(SW3_early_step) %>%
+  inner_join(SW3_late_step)
+
+SW3_inactive <- SW3_wear %>%
+  inner_join(SW3_game_uncomplete, by = c("subject_id", "relative_day")) %>%
+  group_by(subject_id,relative_day) %>%
+  mutate(lead_min = lead(minute),
+         lead_time = lead(datetime)) %>%
+  mutate(inactive = ifelse(lead_min == (minute + 1) %% 60, 0,
+                           as.numeric(difftime(lead_time,datetime,units = "mins"))))
+  
+SW3_inactive_feature <- SW3_inactive %>% 
+  group_by(subject_id,relative_day) %>%
+    summarize(mean_inactive = mean(inactive, na.rm = TRUE),
+            sd_inactive = sd(inactive, na.rm = TRUE)) 
+
+SW3_train_uns <- SW3_step %>%
+  inner_join(SW3_inactive_feature)
+  
+halfhr_raw_step <- SW3_train_uns %>%
+  mutate(time = hour + 0.5*(half_hr - 1)) %>%
+  select(1:2,5,time) %>% 
+    spread(time, half_hr_step)
+
+SW3_train_uns <- SW3_train_uns %>%
+   select(-hour,-half_hr,-half_hr_step) %>%
+   unique()
+SW3_spread <- SW3_train_uns %>%
+  ungroup() %>%
+  inner_join(halfhr_raw_step)%>%  
+  filter(subject_id != 13) ## abnormal case
+  
+SW3_train_spread <- SW3_spread  %>%
+  select(-subject_id,-relative_day) 
+
+
+### ----------------------  K = 3
+## Plot the average of three clusters
+  k3 <- kmeans(na.omit(SW3_train_spread),3, nstart = 20)
+  day <- seq(5,28.5, 0.5)
+  
+  cluster_lab <- k3$cluster
+
+ ## Note: Centroid is essentially the same as the average series of that cluster
+   ## The y-axis is scaled to step per minute for more convienient reading
+   c1 <- SW3_train_spread %>%
+   mutate(cluster = cluster_lab,
+          num = row_number()) %>% 
+   filter(cluster == 1) %>%
+   select(7:54,56) %>%
+   gather(time,steps, -num)
+   
+ c1_centroid <- as.data.frame(cbind(day,c1 = k3$centers[1,c(7:54)])) %>%
+   ggplot() + geom_line(aes(x = day, y = c1/30),color = "black", size = 0.5) + ylab("Cluster 1") + xlab("Hour from 5am to 5am next morning") + scale_x_continuous(breaks=c(seq(5, 28, 1))) + 
+   annotate("text", x = 23, y = 400/30, size = 5, label = "\"Office Walker\"") + annotate("rect", xmin = 7, xmax = 8, ymin = 0, ymax = 500/30, alpha = .3) + 
+   annotate("rect", xmin = 11.5, xmax = 13, ymin = 0, ymax = 500/30, alpha = .3) + 
+   annotate("rect", xmin = 16.5, xmax = 17.5, ymin = 0, ymax = 500/30, alpha = .3) + ylab("Steps per minute")
+ 
+c2_centroid <- as.data.frame(cbind(day,c2 = k3$centers[3,c(7:54)])) %>%
+   ggplot() + geom_line(aes(x = day, y = c2/30),color = "black", size = 0.5) + ylab("Cluster 2") + xlab("Hour from 5am to 5am next morning") + scale_x_continuous(breaks=c(seq(5, 28, 1))) + annotate("text", x = 20, y = 1000/30, size = 5, label = "\"Early Morning Walker\"")+annotate("rect", xmin = 5.5, xmax = 7, ymin = 0, ymax = 2000/30,
+  alpha = .3)+ ylab("Steps per minute")
+
+c3_centroid <- as.data.frame(cbind(day,c3 = k3$centers[2,c(7:54)])) %>%
+   ggplot() + geom_line(aes(x = day, y = c3/30),color = "black", size = 0.5) + ylab("Cluster 3") + xlab("Hour from 5am to 5am next morning") + scale_x_continuous(breaks=c(seq(5, 28, 1))) + annotate("text", x = 12, y = 700/30, size = 5, label = "\"Late Night Walker\"") +annotate("rect", xmin = 20.5, xmax = 22.5, ymin = 0, ymax = 1150/30,
+  alpha = .3)+ ylab("Steps per minute")
+```
+```{r, echo = FALSE}
+  #cluster_3 <- grid.arrange(c1_centroid,c2_centroid,c3_centroid)
+
+```
+
+
+![](plot/Fig.2.png) 
+\n
+
+\n 
+\n 
+Note: The hour 24 ~ 28 corresponds to 0 ~ 5 am of the next morning.
+
+We see distinct characteristics from each of the three groups here:
+
+* Group 1: the "Office walkers". The 2541 person days in this group exhibit routine office walking behavior where the step counts spike during commuting periods (7am ~ 8am and 4pm ~ 5pm), and lunch break (noon). 
+
+* Group 2: the "Early morning walkers". The 203 person days in this group still exhibit the step counts spikes in the commuting and lunch break period. Yet on top of these spikes, we notice a significant peak in the early morning around 6am ~ 7am. In this period, the walking speed reached 50 steps per minute, which is higher than a normal walking speed. Thus we can infer the users in these days very likely made a commitment to walk for exercise in the early morning. 
+
+* Group 3: the "Late night walkers". Similarly, the 113 person days in this group show significant step counts increase between 9pm ~ 10pm, reaching 34 steps per minute. We can draw similar conclusion that the users in these days show habits of exercising in the late evening.
+
+Though patterns already emerge from the three clusters, the next step is to determine what the optimal number of clusters is.
+
+***
+
+####__Step 3: determine the optimal number of clusters__
+
+To determine the optimal number of clusters, we applied the clustering algorithms with **n** ranging between 2 and 50. We observe the plot of the **cost** of clustering against the number of clusters as Fig.2. We measure the cost of the clustering by looking at the total sum of squares within each cluster. The ideal situation is when each data point coincides with their respective centroids and the total sum of squares within each clusters will be zero.
+
+```{r, echo = FALSE}
+
+## Use kmeans to cluster these features + raw count
+bw_total_ratio <- vector()
+cost_km <- vector()
+mod <-list()
+
+for(i in 2: 50) {
+ 
+  model <- kmeans(na.omit(SW3_step),i, nstart = 20, iter.max = 50)
+  mod[[i-1]] <- cbind(i,model$centers)
+  bw_total_ratio[[i-1]] <- model$betweenss / model$totss
+  cost_km[[i-1]] <- model$tot.withinss
+
+  i <- i + 1
+  }
+
+k <-  c(2:50)
+
+info_km <- data.frame(k,cost_km,bw_total_ratio)
+```
+
+```{r cost, echo = FALSE}
+cost <- ggplot(data = info_km, aes(x = k, y = cost_km)) + geom_point() + ylab("Total within-cluster SS") + xlab("Number of clusters") + ggtitle("Fig.2 Cost of K-Means Clustering") ##  elble 3?
+plot(cost)
+```
+
+
+
+
+
+In convention, the optimal number of clusters is determined by an "elbow" -- a significant drop in cost in Fig.2.
+
+However, as you can see, the plot does not suggest an obvious elbow. Therefore a way to computationally determine the elbow is to fit two straight lines from both sides of the slope. Then the intersection of the two best-fit straight lines will be the elbow.
+```{r, echo = FALSE, eval = FALSE}
+AICs <- vector()
+for (c in 3:48) {
+mod <- lm(cost_km ~ k*I(k>=c), data = info_km)
+AICs[[c-2]] <- AIC(mod)
+c <- c + 1
+}
+
+AIC <- as.data.frame(cbind(AICs,c = c(3:48)))
+AIC[AIC$AICs==min(AIC$AICs),] # c = 14
+```
+
+
+We can use AIC as a metric to assess the fitness of the two linear regression lines--the lower the AIC, the more the straight lines fit the points in Fig.3. The following plot shows AIC against the number of clusters. When the number of clusters is 13, AIC reaches its minimum. Thus 13 is the most likely to be the elbow--the optimal number of clusters.
+
+
+![](plot/AIC.png)
+
+
+
+
+
+
+### Result
+
+K-Means Clustering algorithm gives us the 13 clusters as follows:
+
+```{r, echo = FALSE}
+
+## ------------------------- k = 13 
+  k13 <- kmeans(na.omit(SW3_train_spread),13, nstart = 20)
+  day <- seq(5,28.5, 0.5)
+  cluster_lab <- k13$cluster
+  
+#cluster 
+ c <- SW3_spread %>%
+   mutate(cluster = cluster_lab) %>% 
+   select(1:2, 7:57) %>%
+   gather(time,steps, -subject_id, - relative_day, - cluster) %>%
+   mutate(center = 0)
+
+
+ center <- as.data.frame(cbind(cluster = c(1:13),k13$centers[,c(7:54)])) %>%
+   gather(time, steps, -cluster) %>%
+   mutate(center = 1) %>%
+   mutate(minute_step = steps/30) 
+ 
+ center_plot <- center %>%
+   ggplot()+ geom_line(aes(x = as.numeric(time), y = minute_step,
+                            group = as.factor(cluster),color = as.factor(cluster)),
+                             size = 0.8,alpha = 1) + facet_wrap(~cluster, ncol = 3) +theme(legend.position = "null")+ scale_x_continuous(breaks=c(seq(5, 28, 2)))  + xlab("From 5am to 5am next morning") + ylab("Steps per minute")
+
+ c <- bind_rows(c, center)
+ 
+ cplot<-ggplot(c)+ geom_line(aes(x = as.numeric(time), y = steps,
+                            group = interaction(subject_id, relative_day),color = as.factor(center)), size = 0.5, alpha = 0.8) + facet_wrap(~cluster, ncol = 3) +theme(legend.position = "null")+ scale_x_continuous(breaks=c(seq(5, 28, 2)))  + xlab("From 5am to 5am next morning")+
+   geom_line(aes(x = as.numeric(time), y = steps,group = center),color = "black", size = 0.5) + facet_wrap(~center, scales = "free", ncol = 3)
+
+```
+
+![](plot/13clusters.png)
+
+
+
+
+
+The 13 clusters give us much more granular categories. The table below shows the number of days categorized into each cluster.
+
+```{r, echo = FALSE}
+library(knitr)
+#title <- as.data.frame(c("Number of Days", "Proportion"))
+#prop <- spread(as.data.frame(table(k13$cluster)/2890), Var1, Freq)
+#values <- spread(as.data.frame(table(k13$cluster)), Var1, Freq)
+
+tab <- bind_cols(as.data.frame(c(1:13)), as.data.frame(k13$size),as.data.frame(k13$size/2890))
+names(tab)[1]<-paste("Cluster")
+names(tab)[2]<-paste("Number of Days")
+names(tab)[3]<-paste("Proportion")
+
+#table <- bind_cols(title,bind_rows(values, prop)) 
+ 
+#names(table)[1]<-paste("Cluster")
+```
+```{r, echo= FALSE}
+kable(tab, table.attr = "style='width:30%'")
+```
+
+One of the most noticeable differences between clusters is when the peak step counts take place, or if there is a peak in step counts at all. Though the peak happens in different hours, one can in fact see the shadow of the 3 clusters we observed in Step 2:
+
+* There are days when users went for early morning jogs between 6am ~ 8am such as those in cluster 6 and 9.
+* Noon jogs: cluster 2 and 4.
+* Afternoon jogs: cluster 3, 10 and 13.
+* Evening jogs: cluster 7 and 11.
+* Twice jogs in a day: cluster 12.
+* No jogs: cluster 5 and 8. Note: Cluster 5 has almost half of the sample, indicating that the users did not make a commitment for walking-related exercises half of the days.
+
+In comparison with the 3-cluster model, the 13-cluster categorization gives us more details of users' specific walking habits. By looking at the ratio of between-cluster sum of squares by the total sum of squares, we can have an idea of how much of the variance is explained by the model. In this case, the model with 13 clusters significantly improved the ratio from 0.163 in the 3-cluster model to 0.395.
+
+However, depending on the future steps of the study, the 3-cluster model of the days may be sufficient for us to create further categorization of the users, while the 13-cluster model may not provide meaningfully more information. Nonetheless, the 13-cluster model, which shows the importance of the peak points in the clustering process, helped us make more sense of the 3 main categories in the previous model.
+
+### Future directions
+* We are interested in using the categorization of each weekday to help categorize the walking patterns on a person level. 
+    + For example, a user that mostly has "early morning walker" days can be categorized as "early morning walker". 
+    + We can also take into account the day in which the walking pattern occurred. Does the user switch between "early morning walker" and "office walker" as the week goes on? Is the user's walking pattern consistent on a weekly basis? 
+    
+* We would also hope to carry out similar analysis on the weekend days. Though the Step 1 of extracting out usable data will be messier, as we cannot conclude that one did not wear their Fitbit if the step counts start at 2pm on a Sunday, since people's schedule on weekends are indeed more flexible. It might result in fewer data for clustering, but there might be promising results. 

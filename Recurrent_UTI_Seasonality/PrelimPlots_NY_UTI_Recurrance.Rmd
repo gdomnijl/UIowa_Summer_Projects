@@ -1,0 +1,956 @@
+---
+title: "NYC UTI Recurrence Plot"
+output:
+html_document: default
+html_notebook: default
+---
+
+```{r, echo=FALSE}
+## Import from database
+library(ggplot2)
+library(scales)
+library(lubridate)
+library(gridExtra)
+library(caret)
+library(broom)
+library(tidyverse)
+
+```
+
+```{r}
+save(NY_UTI, file = "NY_UTI.RData")
+save(NY_ED_UTI,file = "NY_ED_UTI.RData")
+save(NY_all_dx,file = "NY_all_dx.RData")
+
+check <- load(file = "data/table_CA.RData")
+```
+
+## Reading in data from db
+```{r, echo = FALSE}
+## Database
+NY <- src_sqlite("data/ny.db", create = TRUE)  
+
+NY_UTI <- vector("list", 9) 
+NY_ED_UTI <- vector("list", 9)
+NY_all_dx <- vector("list", 9) 
+
+years <- 2006:2013 ## Note: SEDD record is short of one year (2006 ~ 2013) so start from 2006 for both in/out patient
+
+i <- 1
+p <- progress_estimated(9)
+
+## Since ny.db hospital files from 2006-2012 missed AHAID
+## computed from AHAID link files (see Pre_cleaning.R for details)
+hospital_NY <- tbl(NY, "hospital_link_2006_2013") 
+
+for (year in years) {
+  
+  ## _dte for both prior 2009
+  ## SID_dte for in-patients, SEDD_dte for ED patients
+  if(year >= 2009) {
+    dte <-tbl(NY, paste0("NY_", year, "_SID_dte"))
+    dte_ED <- tbl(NY, paste0("NY_", year, "_SEDD_dte"))
+  } else {
+    dte <- tbl(NY, paste0("NY_", year, "_dte"))
+    dte <- dte %>% 
+      rename(DaysToEvent = DAYSTOEVENT) %>%
+      rename(VisitLink = VISITLINK) %>%
+      mutate(VisitLink = as.integer(VisitLink))
+  }
+  
+  ## Merge with hospital data to get AHAID
+  core <- tbl(NY, paste0("NY_", year, "_SID_core"))  %>%
+    select(DSHOSPID,KEY,AMONTH,AYEAR,LOS,
+           FEMALE,PAY1,RACE,AGE,HCUP_ED) %>%
+    filter(!is.na(AMONTH))  %>%
+    mutate(SOURCE = "inpatient") %>%
+    inner_join(hospital_NY) ## hospital has DSHOSPID, AHAID
+  
+  dx <- tbl(NY, paste0("NY_", year, "_SID_dx"))
+  merged <- dx %>%
+    ## filter out UTI as the primary diagnosis
+    filter(DX == "5990", dx_number == 1) %>%
+    select(KEY,DX,dx_number) %>%
+    inner_join(core, by = "KEY") %>%
+    inner_join(dte, by = "KEY") %>%
+    mutate(discharge = DaysToEvent + LOS) %>%
+    collect(n = Inf)
+  
+  NY_UTI[[i]] <- merged ## 2005~2013
+  
+  ## --------Note: SEDD record is short of one year (2006 ~ 2013)---------
+  core_ED <- tbl(NY, paste0("NY_", year, "_SEDD_core")) %>%
+    select(DSHOSPID,KEY,AMONTH,AYEAR,LOS,
+           FEMALE,PAY1,RACE,AGE,HCUP_ED) %>%
+    filter(!is.na(AMONTH)) %>%
+    mutate(SOURCE = "ED") %>%
+    inner_join(hospital_NY)
+  
+  dx_ED <- tbl(NY, paste0("NY_", year, "_SEDD_dx"))
+  
+  merged_ED <- dx_ED %>%
+    filter(DX == "5990", dx_number == 1) %>%
+    select(KEY,DX,dx_number) %>%
+    inner_join(core_ED,by = "KEY") 
+  
+  if(year >=2009) {
+    merged_ED <- merged_ED %>%
+      inner_join(dte_ED, by = "KEY") %>%
+      mutate(discharge = DaysToEvent + LOS) %>%
+      collect(n=Inf)
+  } else {
+    merged_ED <- merged_ED %>%
+      inner_join(dte, by = "KEY") %>%
+      mutate(discharge = DaysToEvent + LOS) %>%
+      collect(n=Inf)
+  }
+  
+  NY_ED_UTI[[i]] <- merged_ED  ## 2006~2013
+  
+  ## Collect all dx 
+  if(year >=2007 & year <=2013) {
+    temperature <- tbl(NY, "AHAID_temperature_1998_2013")
+    core_all <- tbl(NY, paste0("NY_", year, "_SID_core")) %>%
+      select(AYEAR,AMONTH,DSHOSPID) %>%
+      inner_join(hospital_NY) %>%
+      inner_join(temperature, by=c("AMONTH" = "month", 
+                                   "AYEAR" = "year", 
+                                   "AHAID" = "AHAID")) %>%
+      # mutate(date = mdy(paste0(AMONTH, "01", AYEAR, sep = "-"))) %>%
+      mutate(ave_ave_temp = ave_ave_temp * 1.8 + 32,
+             ave_high_temp = ave_high_temp * 1.8 + 32,
+             ave_low_temp = ave_low_temp * 1.8 + 32) %>%
+      collect()
+    
+    core_all_ED <- tbl(NY, paste0("NY_", year, "_SEDD_core"))  %>%
+      select(AYEAR,AMONTH,DSHOSPID) %>%
+      inner_join(hospital_NY) %>%
+      inner_join(temperature, by=c("AMONTH" = "month", 
+                                   "AYEAR" = "year", 
+                                   "AHAID" = "AHAID")) %>%
+      #mutate(date = mdy(paste(AMONTH, "01", AYEAR, sep = "-"))) %>%
+      mutate(ave_ave_temp = ave_ave_temp * 1.8 + 32,
+             ave_high_temp = ave_high_temp * 1.8 + 32,
+             ave_low_temp = ave_low_temp * 1.8 + 32) %>%
+      collect()
+    NY_all_dx[[i]] <- bind_rows(core_all_ED, core_all)
+    
+  }
+  ## Printing progress
+  i <- i + 1
+  p$tick()$print()
+}
+
+## Binding all lists into one table
+inpatient <- bind_rows(NY_UTI) %>%
+  mutate(SOURCE = "inpatient")
+ED <- bind_rows(NY_ED_UTI) %>%
+  mutate(SOURCE = "ED")
+table <- bind_rows(inpatient, ED)
+NY_all_dx <- bind_rows(NY_all_dx)
+```
+
+## Computing recurrence
+```{r, echo=FALSE}
+
+## If there is a same-day visit to ER and to normal, count towards
+## the in-patient visit
+clean_table <- table %>%
+  select(VisitLink,DaysToEvent,SOURCE) %>%
+  unique() %>%
+  group_by(VisitLink,DaysToEvent) %>%
+  arrange(SOURCE) %>%
+  filter(row_number()==n()) 
+
+## Computing Recurrence Table
+## Indicating if recurrent, leading to recurrent, non-recurrent
+recur_tbl <- table %>%
+  semi_join(clean_table) %>%
+  filter(!is.na(LOS)) %>%
+  #filter(SOURCE =="ED") %>% ## looking at ED data
+  group_by(VisitLink) %>%
+  arrange(VisitLink,DaysToEvent) %>%
+  mutate( pre_vl = lag(discharge),
+          next_vl = lead(DaysToEvent),
+          pre_interval = DaysToEvent - pre_vl,
+          next_interval = next_vl - discharge,
+          recurrent = 1*(pre_interval < 365),
+          leading_recur = 1*(next_interval < 365)) %>%
+  mutate(recurrent = ifelse(is.na(pre_interval), #& AYEAR > 2006, ***?????
+                            0,
+                            recurrent),
+         leading_recur = ifelse(is.na(leading_recur), #& AYEAR < 2011,
+                                0, leading_recur),
+         non_re = 1*(!recurrent & !leading_recur),
+         recur_type = ifelse(non_re, "non",
+                             ifelse(recurrent, "recur",
+                                    "leading"))) %>%
+  group_by(VisitLink) %>%
+  mutate(dx_index = row_number() - 1)
+
+## linking weather data for UTI recur tables
+## ------------------ Linking weather data ------------------
+## Compute hospital data:
+temp_file <- tbl(NY, "AHAID_temperature_1998_2013") %>%
+  filter(year %in% 2007:2012) %>%
+  select(-ave_bin,-low_bin,-high_bin) %>%
+  collect(n = Inf)
+
+## Trim the extreme 10% temperature on both upper and lower sides
+
+
+recur_tbl_NY  <- recur_tbl %>%
+  ungroup() %>%
+  mutate(AHAID = as.numeric(AHAID)) %>%
+  inner_join(temp_file, by=c("AMONTH" = "month", 
+                             "AYEAR" = "year", 
+                             "AHAID" = "AHAID")) %>%
+  mutate(date = mdy(paste(AMONTH, "01", AYEAR, sep = "-"))) %>%
+  mutate(ave_ave_temp = ave_ave_temp * 1.8 + 32,
+         ave_low_temp = ave_low_temp * 1.8 + 32,
+         ave_high_temp = ave_high_temp * 1.8 + 32)
+
+
+```
+
+## A general plot to look at the seasonality of three recur_types
+```{r}
+recur_tbl_NY %>%
+  ungroup() %>%
+  filter(AYEAR %in% 2007:2012, !is.na(AMONTH)) %>%
+  mutate(date = mdy(paste(AMONTH, "01", AYEAR, sep = "-"))) %>%
+  group_by(date, recur_type) %>%
+  mutate(count = n()) %>% 
+   group_by(recur_type) %>%
+          mutate(mean = mean(count),
+                    sd = sd(count),
+                zcount = (count - mean)/sd) %>%
+  ggplot() + geom_line(aes(x = date, y = zcount, group = recur_type, color = recur_type)) + ggtitle("UTI diagnosis in NY from 2007 to 2012 (Normalized)") + ylab("Standardized Count") + xlab("")
+```
+
+
+## ED vs Inpatient
+```{r}
+tbl_SOURCE_leading_recur_NY <- recur_tbl %>%
+  ungroup() %>%
+  filter(AYEAR %in% 2007:2012, !is.na(AMONTH)) %>%
+  mutate(date = as.Date(mdy(paste(AMONTH, "01", AYEAR, sep = "-")))) %>%
+  group_by(date, SOURCE) %>%
+  filter(recur_type == "leading" | recur_type == "recur") %>%
+  select(-recur_type) %>%
+  summarise(count = n()) 
+
+
+ggplot(data = tbl_SOURCE_leading_recur_NY, aes(x = date, y = count)) + 
+  geom_line(aes(colour=SOURCE, group=SOURCE))+  scale_y_continuous(trans=log10_trans()) + 
+  xlab("") + ylab("Number of UTI diagnosis (log scale)") + ggtitle("Leading and recurrent UTI Diagnosis in NY from 2007 to 2012") + scale_fill_discrete(name="Data Source",
+                         breaks=c("ED", "inpatient"),
+                         labels=c("ED", "Inpatient"))  + ylab("")
+```
+
+## Group of females between 18 ~ 40
+```{r}
+## women 18-40  
+
+## Compare between recur_level
+select_tbl_NY <- recur_tbl_NY %>%
+  group_by(VisitLink) %>%
+          mutate(num_recur = last(dx_index)) %>%
+          select(VisitLink, AYEAR, AMONTH, num_recur, AGE, FEMALE, ave_ave_temp,ave_high_temp,ave_low_temp) %>%
+          mutate(recur_level = ifelse(num_recur == 0, "non",
+                                      ifelse(num_recur == 1, "1",
+                                             ifelse(num_recur == 2, "2",
+                                                    ifelse(num_recur == 3, "3",
+ 
+         ifelse(num_recur > 10, "extreme", "frequent")))))) %>%
+  filter(FEMALE ==1) %>%
+  mutate(select = ifelse(AGE <= 40 & AGE >= 18, 1, 0),
+         recur_level = factor(recur_level, levels = c("non", "1", "2","3","frequent","extreme")),
+          date = AYEAR + AMONTH/12) %>%
+  filter(select ==1)
+## Color Scale
+pall <- c("#ec7014",
+  "#9ebcda",
+  "#8c96c6",
+  "#8c6bb1",
+  "#88419d",
+  "#6e016b")
+  
+## yearly
+yearly<-select_tbl_NY %>%
+  group_by(date, recur_level) %>%
+  summarize(count = n()) %>%
+  group_by(recur_level) %>%
+  mutate(mean = mean(count),
+         sd = sd(count),
+         zscore = (count - mean)/sd) %>%
+  ggplot() + geom_line(aes(x = date, y = zscore, group = as.factor(recur_level), color = as.factor(recur_level))) + ggtitle("NY: Female diagnosis with age between 18 ~ 40") + scale_colour_manual(values=pall) +ggtitle("NYC selected UTIs") + xlab("") #+ theme(legend.position = "none") 
+
+
+## monthly 
+monthly <-select_tbl_NY %>%
+   
+  group_by(AMONTH, recur_level) %>%
+  summarize(count = n()) %>%
+  group_by(recur_level) %>%
+  mutate(mean = mean(count),
+         sd = sd(count),
+         zscore = (count - mean)/sd) %>%
+  ggplot() + geom_line(aes(x = as.factor(AMONTH), y = zscore, group = as.factor(recur_level), color = as.factor(recur_level))) + scale_colour_manual(values=pall) + theme(legend.position = "none") + xlab("Monthly Aggregate")
+grid.arrange(yearly,monthly) 
+```
+## temperature
+```{r}
+
+ave_range_NY<- quantile(recur_tbl_NY$ave_ave_temp, c(0.1,0.9), na.rm = T)
+high_range_NY<- quantile(recur_tbl_NY$ave_high_temp, c(0.1,0.9), na.rm = T)
+low_range_NY <- quantile(recur_tbl_NY$ave_low_temp, c(0.1,0.9), na.rm = T)
+
+temp_tbl_NY <- select_tbl_NY %>%
+ mutate(ave_bin = ifelse(ave_ave_temp > ave_range_NY[1] & ave_ave_temp < ave_range_NY[2], round(ave_ave_temp/5)*5, NA),
+                 high_bin = ifelse(ave_high_temp > high_range_NY[1] & ave_high_temp < high_range_NY[2], round(ave_high_temp/5)*5, NA),
+                  low_bin = ifelse(ave_low_temp > low_range_NY[1] & ave_low_temp < low_range_NY[2], round(ave_low_temp/5)*5, NA))
+
+t_ave_NY <-temp_tbl_NY %>%
+   group_by(ave_bin) %>%
+  mutate(total = n()) %>%
+  group_by(ave_bin, recur_level) %>%
+  mutate(count = n()) %>%
+  mutate(per = count/total) %>%
+    filter(total >= 10000) 
+p1 <- t_ave_NY %>%
+  ggplot() + geom_line(aes(x = ave_bin, y = per,  color =recur_level)) + ggtitle("NYC Selected Group UTIs")  + scale_colour_manual(values=pall) + theme(legend.position = "none") +  #scale_y_continuous(trans=log2_trans()) 
+   xlab("Average Temperature (F)") + ylab("Incidence (Log scale)") + facet_wrap(~recur_level,scales = "free",nrow = 6)
+
+
+t_high_NY <-temp_tbl_NY %>%
+   group_by(high_bin) %>%
+  mutate(total = n()) %>%
+  group_by(high_bin, recur_level) %>%
+  mutate(count = n()) %>%
+  mutate(per = count/total) %>%
+  filter(total >= 10000)
+    #filter(total >= 1000) %>%
+ p2 <- t_high_NY %>% ggplot() + geom_line(aes(x = high_bin, y = per, group = recur_level, color =recur_level)) + ggtitle("NYC Selected Group UTIs") + theme(legend.position = "none") + scale_colour_manual(values=pall) + xlab("High Temperature (F)") + ylab("")  + facet_wrap(~recur_level,scales = "free",nrow = 6)
+
+t_low_NY <-temp_tbl_NY %>%
+   group_by(low_bin) %>%
+  mutate(total = n()) %>%
+  group_by(low_bin, recur_level) %>%
+  mutate(count = n()) %>%
+  mutate(per = count/total) %>%
+  filter(total >= 1000)
+p3 <- t_low_NY %>%
+  ggplot() + geom_line(aes(x = low_bin, y = per, group = recur_level, color =recur_level)) + ggtitle("NYC Selected Group UTIs") + theme(legend.position = "none") + scale_colour_manual(values=pall) + xlab("Low Temperature (F)") + ylab("")  + facet_wrap(~recur_level,scales = "free",nrow = 6)
+p1
+grid.arrange(p1,p2,p3, ncol = 3)
+
+```
+
+
+## Tabulate for plots
+```{r, echo=FALSE}
+## Only consider 2007 to 2012 without NAs
+## Computing date objects, count of three types
+recur_time_tbl <- recur_tbl %>%
+  ungroup() %>%
+  filter(AYEAR %in% 2007:2012) %>% ## ASK: could have retained 2006 for normal in-patient entries
+  mutate(date = mdy(paste(AMONTH, "01", AYEAR, sep = "-"))) 
+
+## Tabulate for Plot_ED
+tbl_TYPE_SOURCE <- tbl1 %>%
+  group_by(date, recur_type, SOURCE) %>%
+  summarise(count = n())
+
+## Tabulate for Plot 1
+tbl1 <- recur_time_tbl %>%
+  group_by(date, recur_type) %>% 
+  summarise(count = n())
+```
+
+## Plot NY 1.1 General time-series: Putting all year from 2007 to 2012 altogether 
+```{r, echo=FALSE}
+## Plot NY 1.1 General time-series: Putting all year from 2007 to 2012 altogether 
+plot1 <- ggplot(tbl1, aes(date, count)) + 
+  geom_line(aes(colour=recur_type, group=recur_type)) + 
+  scale_y_continuous(trans=log10_trans()) +  
+  scale_color_discrete(
+    labels=c("Leading to\nrecurrence", "Non-recurrent", "Recurrent")) + 
+  #  scale_x_continuous(breaks=seq(2007, 2013, 1)) +
+  xlab("Time") + ylab("Number of Diagnosis \n (log transformed)") + ggtitle("UTI Diagnosis in NY from 2007 to 2012") + theme(legend.position="top", legend.title=element_blank())
+
+
+plot1
+```
+
+## Plot NY 1.2 General time-series: [Zooming in on recur and leading]
+```{r, echo=FALSE}
+## Plot NY 1.2 General time-series: [Zooming in on recur and leading]
+ggplot(filter(tbl1, recur_type != "non"), aes(date, count)) + 
+  geom_line(aes(colour=recur_type, group=recur_type)) + 
+  xlab("Date") + ylab("Number of Diagnosis") + ggtitle("Recurrent UTI Diagnosis in NY from 2007 to 2012") + theme(legend.position = "top", legend.title = element_blank())
+```
+
+## Plot NY 1.3 Time-series on an annual scale
+```{r, echo=FALSE}
+## Plot NY 1.3 Time-series on an annual scale
+## Limit the frame to yearly 
+ggplot() + 
+  geom_line(data= tbl1, aes(x = month(date), y = count, colour=recur_type, group=interaction(year(date), recur_type))) +
+  scale_y_continuous(trans=log10_trans()) +  scale_x_continuous(breaks=seq(1,12,1)) + 
+  scale_color_discrete(
+    labels=c("Leading to\nrecurrence", "Non-recurrent", "Recurrent")) + 
+  xlab("Month") + ylab("Number of Diagnosis \n (log transformed)") + ggtitle("UTI Diagnosis across months in New York \n between 2007~2012") + theme(legend.position = "top", legend.title = element_blank())
+```
+
+```{r, echo=FALSE}
+plot2 <-ggplot() + 
+  geom_line(data = filter(tbl1, recur_type != "non"), aes(x = month(date), y = count, colour=recur_type,  group= interaction(year(date),recur_type))) +  scale_x_continuous(breaks=seq(1,12,1)) +
+  xlab("Month") + ylab("Number of Diagnosis") + ggtitle("Recurrent and leading to recurrent UTI\nDiagnosis across months in New York \nbetween 2007~2012") + theme(legend.position = "top", legend.title = element_blank())
+plot2
+```
+
+## Plot NY 1.4 Time-series on an annual scale [Zooming on 'leading' and 'recur']
+
+```{r, echo=FALSE}
+## Plot NY 1.4 Time-series on an annual scale [Zooming on 'leading' and 'recur']
+
+## Compute the mean
+tbl1_year_mean <- tbl1 %>%
+  group_by(month = month(date), recur_type) %>%
+  summarize(yearly_ave = mean(count)) %>%
+  filter(recur_type!= "non")
+
+plot3 <- plot2 + 
+  geom_line(data = tbl1_year_mean, aes(x = month, y = yearly_ave, colour=recur_type,  group= recur_type), size = 1.5)
+plot3
+
+```
+
+## Plot_ED 2.1 Categorized by ED/inpatient data (from 2007 to 2012)
+```{r, echo=FALSE}
+## Plot_ED 2.1 Categorized by ED/inpatient data (from 2007 to 2012)
+tbl_SOURCE <- tbl_TYPE_SOURCE %>%
+  ungroup()
+
+tbl_SOURCE_recur <- tbl_SOURCE %>%
+  group_by(date, SOURCE) %>%
+  filter(recur_type == "recur") %>%
+  select(-recur_type) %>%
+  summarise(count = sum(count)) 
+
+tbl_SOURCE_leading <- tbl_SOURCE %>%
+  group_by(date, SOURCE) %>%
+  filter(recur_type == "leading") %>%
+  select(-recur_type) %>%
+  summarise(count = sum(count)) 
+
+tbl_SOURCE <- tbl_SOURCE %>%
+  select(-recur_type) %>%
+  group_by(date,SOURCE) %>%
+  summarise(count = sum(count))
+
+## TODO: Switching the order
+## TODO: Show every year on scale 
+## TODO: Stretch the plot vertically 
+
+ggplot(data = tbl_TYPE_SOURCE, aes(x = date, y = count)) + 
+  geom_line(aes(colour=SOURCE, group=SOURCE))+ facet_grid(recur_type~., scales="free_y", space = "free") + scale_y_continuous(trans=log10_trans()) + 
+  xlab("Month") + ylab("Number of Diagnosis (log scale)") + ggtitle("UTI Diagnosis in NY from 2007 to 2012")
+
+```
+
+## Plot_ED 2.2 Subset-recurrent Categorized by ED/inpatient data (from 2007 to 2012)
+```{r, echo=FALSE}
+## Plot_ED 2.2 Subset-recurrent Categorized by ED/inpatient data (from 2007 to 2012)
+ggplot(data = tbl_SOURCE_recur, aes(x = date, y = count)) + 
+  geom_line(aes(colour=SOURCE, group=SOURCE))+ scale_y_continuous(trans=log10_trans())+
+  xlab("Time") + ylab("Number of Diagnosis (log scale)") + ggtitle("Recurrent UTI Diagnosis in NY from 2007 to 2012")
+```
+
+## Plot_ED 2.3 Subset-leading by ED/Inpatient
+
+```{r, echo = FALSE}
+## Plot_ED 2.3 Subset-leading by ED/Inpatient
+ggplot(data = tbl_SOURCE_leading, aes(x = date, y = count)) + 
+  geom_line(aes(colour=SOURCE, group=SOURCE))+ scale_y_continuous(trans=log10_trans())+
+  xlab("Month") + ylab("Number of Diagnosis (log scale)") + ggtitle("Leading UTI Diagnosis in NY from 2007 to 2012")
+
+```
+
+## Plot_ED 2.2 on a yearly scale
+*The inpatient cases are much fewer than ED cases which shared similar seasonality, but at the same time interfered with the scale*
+```{r, echo = FALSE}
+## Plot_ED 2.2 on a yearly scale
+## 
+ggplot(data = tbl_TYPE_SOURCE,aes(x = as.factor(month(date)), y = count)) + 
+  geom_line(aes(colour=SOURCE, 
+                group=interaction(SOURCE, year(date)))) + facet_grid(recur_type~.) + scale_y_continuous(trans=log10_trans()) +
+  xlab("Date") + ylab("Number of Diagnosis (log scale)") + ggtitle("UTI Diagnosis in NY from 2007 to 2012")
+```
+
+## ------------------  Absolute all dx over temperature bin (all dx already linked with temperature info)------- -----------------------------
+```{r, echo = FALSE}
+NY_all_dx <- NY_all_dx %>%
+  select(-ave_bin, -low_bin, -low_bin) %>%
+  mutate(date = mdy(paste(AMONTH, "01", AYEAR, sep = "-"))) %>%
+  mutate(ave_bin = round(ave_ave_temp/5)*5,
+         high_bin = round(ave_high_temp/5)*5,
+         low_bin = round(ave_low_temp/5)*5)
+## Written-out NY_all_dx:
+# write_csv(NY_all_dx, "data/NY_all_dx_with_temperature_2007_2013.csv")
+
+## Ave temp
+tplot_all_dx_ave <-  NY_all_dx%>%
+  group_by(ave_bin) %>% 
+  summarize(count = n())
+
+
+## High 
+tplot_all_dx_high <- NY_all_dx %>%
+  group_by(high_bin) %>% 
+  summarize(count = n()) %>%
+  ggplot() + geom_point(aes(x = high_bin, y = count, colour = "red")) +  theme(legend.position="none") +
+  xlab("High Temperature (F)")  + ylab("All dx (absolute count)")
+
+## Low
+tplot_all_dx_low <- NY_all_dx %>%
+  group_by(low_bin) %>% 
+  summarize(count = n()) %>% 
+  ggplot() + geom_point(aes(x = low_bin, y = count, colour = "blue")) +  theme(legend.position="none") + 
+  xlab("Low Temperature (F)")  + ylab("All dx (absolute count)")
+```
+
+
+
+
+
+## -------------------   Absolute UTIs over temperature  -------------------------------
+
+```{r}
+## Ave 
+
+tplot_UTI_ave <- temp_table %>%
+  group_by(ave_bin) %>%
+  summarize(count = n()) %>%
+  ggplot() + geom_point(mapping = aes(x=ave_bin, y = count, colour = "black"), shape = 3) + xlab("Average temperature (F)") + ylab("UTIs (absolute counts)") + theme(legend.position="none") 
+
+## High 
+tplot_UTI_high <- temp_table %>%
+  group_by(high_bin) %>%
+  summarize(count = n()) %>%
+  ggplot() + geom_point(aes(x=high_bin, y = count), shape = 3) +  theme(legend.position="none")  + xlab("high temperature (F)") + ylab("UTIs (absolute counts)")
+
+## Low
+tplot_UTI_low <- temp_table %>%
+  group_by(low_bin) %>%
+  summarize(count = n()) %>%
+  ggplot() + geom_point(aes(x=low_bin, y = count, colour = "blue"), shape = 3) +  theme(legend.position="none") + xlab("low temperature (F)") + ylab("UTIs (absolute counts)")
+```
+
+
+
+## -------------------   Absolute NON-Recurrent UTIs over temperature  -------------------------------
+```{r, echo=FALSE}
+non_re_UTI_ave <- temp_table %>%
+  filter(recur_type == "non") %>%
+  group_by(ave_bin) %>%
+  summarize(non_re_count = n()) 
+
+tplot_non_re_UTI_ave <- non_re_UTI_ave %>%
+  ggplot() + geom_point(aes(x = ave_bin, y = non_re_count), shape = 10) + xlab("Average temperature (F)") +
+  ylab("Non-Recurrent UTI (absolute counts)")
+
+non_re_UTI_high <- temp_table %>%
+  filter(recur_type == "non") %>%
+  group_by(high_bin) %>%
+  summarize(non_re_count = n()) 
+
+tplot_non_re_UTI_high <- non_re_UTI_high %>%
+  ggplot() + geom_point(aes(x = high_bin, y = non_re_count), shape = 10) + xlab("High temperature (F)") +
+  ylab("Non-Recurrent UTI (absolute counts)")
+
+non_re_UTI_low <- temp_table %>%
+  filter(recur_type == "non") %>%
+  group_by(low_bin) %>%
+  summarize(non_re_count = n()) 
+
+tplot_non_re_UTI_low <- non_re_UTI_low %>%
+  ggplot() + geom_point(aes(x = low_bin, y = non_re_count), shape = 10) + xlab("Low temperature (F)") +
+  ylab("Non-Recurrent UTI (absolute counts)")
+```
+
+
+## ------------------  UTI rate over all dx vs temperature ------- -----------------------------
+```{r echo = FALSE}
+## average 
+NY_all_dx_ave <- NY_all_dx%>%
+  group_by(ave_bin) %>% 
+  summarize(count = n()) 
+
+NY_all_dx_ave<- temp_table %>%
+  group_by(ave_bin) %>%
+  summarise(UTI_count = n()) %>%
+  full_join(NY_all_dx_ave) %>%
+  mutate(UTI_rate = UTI_count/count)
+
+tplot_UTI_ave_rate <- NY_all_dx_ave %>%
+  filter(count >= 10000) %>%  ### Cutting off both extreme sides where temperature bin do not have enough observations (< 10000)
+  ggplot() + geom_point(aes(x = ave_bin, y = UTI_rate), shape = 7) + xlab("Average temperature(F)") + ylab("UTI Incidence Rate")
+
+## high 
+NY_all_dx_high <- NY_all_dx%>%
+  group_by(high_bin) %>% 
+  summarize(count = n()) 
+NY_all_dx_high <-  temp_table %>%
+  group_by(high_bin) %>%
+  summarise(UTI_count = n()) %>%
+  full_join(NY_all_dx_high) %>%
+  mutate(UTI_rate = UTI_count/count)
+tplot_UTI_high_rate <-  NY_all_dx_high %>%
+    filter(count >= 10000) %>%  ### Cutting off both extreme sides where temperature bin do not have enough observations (< 10000)
+  ggplot() + geom_point(aes(x = high_bin, y = UTI_rate), shape = 7) + xlab("High temperature(F)") + ylab("UTI Incidence Rate")
+
+
+## low 
+NY_all_dx_low <- NY_all_dx%>%
+  group_by(low_bin) %>% 
+  summarize(count = n()) 
+NY_all_dx_low <- temp_table %>%
+  group_by(low_bin) %>%
+  summarise(UTI_count = n()) %>%
+  full_join(NY_all_dx_low) %>%
+  mutate(UTI_rate = UTI_count/count)
+  
+  tplot_UTI_low_rate <- NY_all_dx_low %>%
+      filter(count >= 10000) %>%  ### Cutting off both extreme sides where temperature bin do not have enough observations (< 10000)
+  ggplot() + geom_point(aes(x = low_bin, y = UTI_rate), shape = 7) + xlab("low temperature(F)") + ylab("UTI Incidence Rate")
+```
+
+
+## ------------------- % recurrances over all UTIs --------------------------------------
+
+```{r, echo = FALSE}
+tab_UTI_ave <- temp_table %>%
+  filter(recur_type == "leading" | recur_type == "non") %>%
+  group_by(ave_bin) %>%
+  summarise(first_UTI_count = n())
+
+tab_recur_ave <- temp_table %>%
+  filter(recur_type == "leading") %>%
+  group_by(ave_bin) %>%
+  summarise(leading_count = n())
+
+tab_recur_ave <- tab_recur_ave %>%
+  full_join(tab_UTI_ave) %>%
+  mutate(recur_rate = leading_count / first_UTI_count) ## 
+
+tplot_recur_ave <- tab_recur_ave%>%
+  filter(first_UTI_count >= 5000) %>% ## Make sure there are enough observations to be in the denominator
+  ggplot() + geom_point(aes(x = ave_bin, y = recur_rate), shape = 2)+  theme(legend.position="none")  + xlab("Average temperature") + ylab("UTI Recurrence Rate")
+
+
+## High
+tab_UTI_high <- temp_table %>%
+  filter(recur_type == "leading" | recur_type == "non") %>%
+  group_by(high_bin) %>%
+  summarise(first_UTI_count = n())
+
+tab_recur_high <- temp_table %>%
+  filter(recur_type == "leading") %>%
+  group_by(high_bin) %>%
+  summarise(leading_count = n())
+tab_recur_high <- tab_recur_high %>%
+  full_join(tab_UTI_high) %>%
+  mutate(recur_rate = leading_count / first_UTI_count)
+tplot_recur_high <- tab_recur_high %>%
+    filter(first_UTI_count >= 5000) %>% ## Make sure there are enough observations to be in the denominator
+  ggplot() + geom_point(aes(x = high_bin, y = recur_rate, colour = "red"), shape = 2) + theme(legend.position = "none") + xlab("High temperature") + ylab("UTI Recurrence Rate")
+
+## low
+tab_UTI_low <- temp_table %>%
+  filter(recur_type == "leading" | recur_type == "non") %>%
+  group_by(low_bin) %>%
+  summarise(first_UTI_count = n())
+
+tab_recur_low <- temp_table %>%
+  filter(recur_type == "leading") %>%
+  group_by(low_bin) %>%
+  summarise(leading_count = n())
+
+tab_recur_low <- tab_recur_low %>%
+  full_join(tab_UTI_low) %>%
+  mutate(recur_rate = leading_count / first_UTI_count)
+
+tplot_recur_low <- tab_recur_low%>%
+    filter(first_UTI_count >= 5000) %>% ## Make sure there are enough observations to be in the denominator
+  ggplot() + geom_point(aes(x = low_bin, y = recur_rate, colour = "blue"), shape = 2) + theme(legend.position = "none")+ xlab("Low temperature") + ylab("UTI Recurrence Rate")
+
+```
+
+
+## ------------------- Leading to recurrance UTI absolute count --------------------------------------
+```{r, echo=FALSE}
+tplot_abs_recur_ave <- tab_recur_ave%>%
+  ggplot() + geom_point(aes(x = ave_bin, y = leading_count), shape = 8)+  theme(legend.position="none")  + xlab("Average temperature") + ylab("UTI Recurrence (absolute counts)")
+
+tplot_abs_recur_high <- tab_recur_high%>%
+  ggplot() + geom_point(aes(x = high_bin, y = leading_count), shape = 8)+  theme(legend.position="none")  + xlab("High temperature") + ylab("UTI Recurrence (absolute counts)")
+
+tplot_abs_recur_low <- tab_recur_low%>%
+  ggplot() + geom_point(aes(x = low_bin, y = leading_count), shape = 8)+  theme(legend.position="none")  + xlab("Low temperature") + ylab("UTI Recurrence (absolute counts)")
+```
+
+
+## ---------------------------------- Comparison -----------------------------------
+
+**Remarks: For the bottom right graph on UTI Recurrence rate, the spike in the end comes from the extremely small (comparatively speak ing) counts of both UTIs and recur UTIs in the 82-84 bin (34 : 11) . Therefore the recur rate is rather unreliable. **
+```{r}
+grid.arrange(tplot_all_dx_ave, tplot_UTI_ave, tplot_non_re_UTI_ave,tplot_abs_recur_ave, tplot_UTI_ave_rate,tplot_recur_ave, ncol = 3)
+```
+
+**Remarks: For the bottom right graph on UTI recurrence rate, similarly, the spike in the end comes from the extremely small (comparatively speaking) counts of both UTIs and recur UTIs in the 92-94 and 94-96 bin (22 : 6 and 34 : 11) which boost the recur rate to about 0.3 as compared to 0.15 on average. Therefore the recur rate is rather unreliable. **
+```{r}
+grid.arrange(tplot_all_dx_high, tplot_UTI_high, tplot_non_re_UTI_high,tplot_abs_recur_high,tplot_UTI_high_rate,tplot_recur_high, ncol = 3)
+
+```
+
+
+
+```{r}
+grid.arrange(tplot_all_dx_low, tplot_UTI_low,tplot_non_re_UTI_low, tplot_abs_recur_low,tplot_UTI_low_rate,tplot_recur_low, ncol = 3)
+
+```
+
+
+## ---------------------------------Time Series Analysis ---------------------------------------
+
+```{r}
+library(tseries)
+ts1 <- recur_time_tbl %>%
+  filter(recur_type == "recur") %>%
+  group_by(date) %>%
+  summarize(count = log(n())) 
+
+
+diff <- bind_cols(date = ts1$date[-1], diff = diff(ts1$count)) %>%
+  ts() 
+
+adf.test(diff$diff, alternative="stationary", k=0) ## can only run when diff is not set to be a ts
+acf(diff)
+
+fit1 <- arima(diff, c(1,0,0))
+```
+
+## ------------------ Fitting glm ----------------
+```{r}
+leading_NY <- temp_table %>%
+  ungroup() %>%
+  filter(AYEAR %in% 2007:2012, 
+         !is.na(AMONTH),
+         recur_type == "leading") %>%
+  select(FEMALE,AGE,RACE,ave_ave_temp,recur_type,AMONTH,AYEAR)
+  
+
+non_NY <- temp_table %>%
+  ungroup() %>%
+  filter(AYEAR %in% 2007:2012, 
+         !is.na(AMONTH),
+         recur_type == "non") %>%
+  select(FEMALE,AGE,RACE,ave_ave_temp,recur_type,AMONTH,AYEAR) 
+
+uti_NY <- bind_rows(leading_NY,non_NY) %>%
+  mutate(leading = as.factor(ifelse(recur_type == "non", 0, 1)),
+         FEMALE = as.factor(FEMALE),
+         RACE = as.factor(RACE),
+         AMONTH = (as.factor(AMONTH)),
+         AYEAR = as.factor(AYEAR),
+         temp_bin = relevel((as.factor(ifelse(ave_ave_temp < 30, "less than 30", ## reasonable?
+                           ifelse(ave_ave_temp > 75, "more than 75",
+                                  (ave_ave_temp %/% 5) * 5)))),10)) %>%
+  select(-ave_ave_temp, -recur_type) 
+```
+
+```{r}
+cvControl <- trainControl(method = "cv", number = 10)
+
+## Female
+ny_f  <- uti_NY %>%
+    filter(FEMALE == 1) %>%
+    na.omit()
+
+  ny_mod_f <- train(leading ~. -FEMALE -temp_bin, data = ny_f, method = "glm", trControl = cvControl)
+  ny_mod_f_temp <- train(leading ~. -FEMALE, data = ny_f, method = "glm", trControl = cvControl)
+ny_mod_f_t <-  train(leading ~. -FEMALE -AMONTH - AYEAR, data = ny_f, method = "glm", trControl = cvControl)
+ny_mod_d <- train(leading ~ . -FEMALE -AMONTH - AYEAR - temp_bin, data = ny_f, method = "glm", trControl = cvControl)
+## Male  
+ny_m  <- uti_NY %>%
+    filter(FEMALE == 0) %>%
+    na.omit()
+
+  ny_mod_m <- train(leading ~. -FEMALE -temp_bin, data = ny_m, method = "glm", trControl = cvControl)
+  ny_mod_m_temp <- train(leading ~. -FEMALE, data = ny_m, method = "glm", trControl = cvControl)
+  ny_mod_m_t <-  train(leading ~. -FEMALE -AMONTH - AYEAR, data = ny_m, method = "glm", trControl = cvControl)
+  ny_mod_m_d <- train(leading ~. -FEMALE -AMONTH -AYEAR - temp_bin, data= ny_m, method = "glm", trControl = cvControl)
+   
+## Comparing coefficients
+wo_temp <-tidy(ny_mod_f$finalModel$coefficients[8:18])%>%
+    rename(without_temp = x)
+
+ w_temp <- tidy(ny_mod_f_temp$finalModel$coefficients[8:18]) %>%
+                rename(with_temp = x) %>% 
+                   select(-names)
+ coef_change<- as.data.frame(cbind(wo_temp,w_temp)) %>%
+      mutate(month = as.numeric(stringr::str_extract(names,"[0-9]+"))) %>%
+   select(-names)
+ coef <- gather(coef_change,type,coef,-month)
+ 
+ggplot(data = coef) + geom_line(aes(x = as.factor(month), y = coef, color = type,group= type))
+
+wo_temp2 <-tidy(ny_mod_m$finalModel$coefficients[8:18]) %>%
+  rename(without_temp = x)
+ w_temp2 <- tidy(ny_mod_m_temp$finalModel$coefficients[8:18]) %>%
+   rename(with_temp = x) %>%
+   select(-names)
+ coef_change2 <- as.data.frame(cbind(wo_temp2,w_temp2)) %>%
+   mutate(month = as.numeric(stringr::str_extract(names,"[0-9]+"))) %>%
+   select(-names)
+ coef2 <- gather(coef_change2,type,coef,-month)
+ 
+ggplot(data = coef2) + geom_line(aes(x = as.factor(month), y = coef, color = type, group = type))
+```
+
+```{r}
+library(lmtest)
+### ----------------------- Female
+lrtest(ny_mod_f_temp$finalModel,ny_mod_f$finalModel) ## with season: temp vs no temp 
+ #Df  LogLik  Df  Chisq Pr(>Chisq)    
+1  33 -167758                          
+2  23 -168072 -10 626.56  < 2.2e-16 ***
+lrtest(ny_mod_f_t$finalModel,ny_mod_d$finalModel) ## no season: temp  vs no temp 
+ #Df  LogLik  Df  Chisq Pr(>Chisq)    
+1  17 -168035                          
+2   7 -168106 -10 141.33  < 2.2e-16 ***
+lrtest(ny_mod_f_temp$finalModel,ny_mod_f_t$finalModel)
+  #Df  LogLik  Df  Chisq Pr(>Chisq)    
+1  33 -167758                          
+2  17 -168035 -16 552.72  < 2.2e-16 ***
+  
+  
+### ----------------------- Male (temperature did not have as much additional info)
+lrtest(ny_mod_m$finalModel,ny_mod_m_temp$finalModel) ## with season: temp vs no temp
+ #Df LogLik Df  Chisq Pr(>Chisq)    
+1  23 -37850                         
+2  33 -37822 10 56.502  1.653e-08 ***
+lrtest(ny_mod_d$finalModel,ny_mod_f_t$finalModel) ## without season: temp vs no temp
+  #Df  LogLik Df  Chisq Pr(>Chisq)    
+1   7 -168106                         
+2  17 -168035 10 141.33  < 2.2e-16 ***
+---
+lrtest(ny_mod_m_t$finalModel,ny_mod_m_temp$finalModel) ## with temp: season vs no season
+ #Df LogLik Df  Chisq Pr(>Chisq)    
+1  17 -37848                         
+2  33 -37822 16 51.006  1.583e-05 ***
+```
+
+## Female
+```{r}
+
+## Model with both temperature and season for female diagnosis
+p_ny_mod_f_temp1<- tidy(ny_mod_f_temp$finalModel) %>%
+  filter(stringr::str_detect(term, "temp_"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "temp_binless than 30",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(temp = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+  mutate(temp = ifelse(stringr::str_detect(term, "less"), temp - 5, temp),
+         temp = ifelse(stringr::str_detect(term, "more"), temp + 5, temp))%>%
+ ggplot() + geom_line(aes(x = temp, y = exp(estimate))) + geom_ribbon(aes(x = temp, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Temperature bins (every 5 degrees)") + ylab("Odds ratio of recurrence") +    geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with both temperature and season for female diagnosis")
+
+p_ny_mod_f_temp2<- tidy(ny_mod_f_temp$finalModel) %>%
+  filter(stringr::str_detect(term, "AMONTH"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "AMONTH1",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(month = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+ ggplot() + geom_line(aes(x = month, y = exp(estimate))) + geom_ribbon(aes(x = month, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Month") + ylab("Odds ratio of recurrence") +geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with both temperature and season for female diagnosis") + scale_x_continuous(breaks=seq(1, 12, 1))  
+
+## Model with only temperature for female diagnosis
+p_ny_mod_f_t <- tidy(ny_mod_f_t$finalModel) %>%
+  filter(stringr::str_detect(term, "temp_"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "temp_binless than 30",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(temp = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+  mutate(temp = ifelse(stringr::str_detect(term, "less"), temp - 5, temp),
+         temp = ifelse(stringr::str_detect(term, "more"), temp + 5, temp))%>%
+ ggplot() + geom_line(aes(x = temp, y = exp(estimate))) + geom_ribbon(aes(x = temp, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Temperature bins (every 5 degrees)") + ylab("Odds ratio of recurrence") +    geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with only temperature for female diagnosis")
+
+## Model with only season for female diagnosis
+
+p_ny_mod_f <- tidy(ny_mod_f$finalModel) %>%
+  filter(stringr::str_detect(term, "AMONTH"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "AMONTH1",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(month = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+ ggplot() + geom_line(aes(x = month, y = exp(estimate))) + geom_ribbon(aes(x = month, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Month") + ylab("Odds ratio of recurrence") +geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with only season for female diagnosis") + scale_x_continuous(breaks=seq(1, 12, 1))  
+
+
+grid.arrange(p_ny_mod_f_temp1,p_ny_mod_f_temp2,p_ny_mod_f_t, p_ny_mod_f, ncol = 2)
+```
+
+## Male
+```{r}
+
+## Model with both temperature and season for female diagnosis
+p_ny_mod_m_temp1<- tidy(ny_mod_m_temp$finalModel) %>%
+  filter(stringr::str_detect(term, "temp_"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "temp_binless than 30",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(temp = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+  mutate(temp = ifelse(stringr::str_detect(term, "less"), temp - 5, temp),
+         temp = ifelse(stringr::str_detect(term, "more"), temp + 5, temp))%>%
+ ggplot() + geom_line(aes(x = temp, y = exp(estimate))) + geom_ribbon(aes(x = temp, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Temperature bins (every 5 degrees)") + ylab("Odds ratio of recurrence") +    geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with both temperature and season for male diagnosis")
+
+p_ny_mod_m_temp2<- tidy(ny_mod_m_temp$finalModel) %>%
+  filter(stringr::str_detect(term, "AMONTH"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "AMONTH1",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(month = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+ ggplot() + geom_line(aes(x = month, y = exp(estimate))) + geom_ribbon(aes(x = month, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Month") + ylab("Odds ratio of recurrence") +geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with both temperature and season for male diagnosis") + scale_x_continuous(breaks=seq(1, 12, 1))  
+
+## Model with only temperature for female diagnosis
+p_ny_mod_m_t <- tidy(ny_mod_m_t$finalModel) %>%
+  filter(stringr::str_detect(term, "temp_"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "temp_binless than 30",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(temp = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+  mutate(temp = ifelse(stringr::str_detect(term, "less"), temp - 5, temp),
+         temp = ifelse(stringr::str_detect(term, "more"), temp + 5, temp))%>%
+ ggplot() + geom_line(aes(x = temp, y = exp(estimate))) + geom_ribbon(aes(x = temp, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Temperature bins (every 5 degrees)") + ylab("Odds ratio of recurrence") +    geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with only temperature for male diagnosis")
+
+## Model with only season for female diagnosis
+
+p_ny_mod_f <- tidy(ny_mod_f$finalModel) %>%
+  filter(stringr::str_detect(term, "AMONTH"))%>%
+  select(term,estimate,std.error) %>%
+  bind_rows(tibble(term = "AMONTH1",
+                   estimate = 0,
+                   std.error= NA)) %>%
+  mutate(month = as.numeric(stringr::str_extract(term,"[0-9]+"))) %>%
+ ggplot() + geom_line(aes(x = month, y = exp(estimate))) + geom_ribbon(aes(x = month, ymax=exp(estimate + 1.96*std.error), ymin =exp(estimate - 1.96*std.error)), alpha = 0.25) + xlab("Month") + ylab("Odds ratio of recurrence") +geom_hline(yintercept = 1, color = "red", alpha = 0.3) + ggtitle("Model with only season for male diagnosis") + scale_x_continuous(breaks=seq(1, 12, 1))  
+
+
+grid.arrange(p_ny_mod_m_temp1,p_ny_mod_m_temp2,p_ny_mod_m_t, p_ny_mod_f, ncol = 2)
+```
